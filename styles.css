@@ -1,0 +1,83 @@
+/* OpenCode Memory Chat — minimal, native Obsidian look */
+
+.ocmc-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0;
+}
+
+.ocmc-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  font-weight: 600;
+  color: var(--text-normal);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.ocmc-status {
+  padding: 4px 10px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  min-height: 1.4em;
+}
+
+.ocmc-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ocmc-msg { display: flex; }
+.ocmc-user { justify-content: flex-end; }
+.ocmc-assistant, .ocmc-system { justify-content: flex-start; }
+
+.ocmc-bubble {
+  max-width: 85%;
+  padding: 6px 10px;
+  border-radius: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: var(--font-ui-small);
+  line-height: 1.45;
+}
+
+.ocmc-user .ocmc-bubble {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-bottom-right-radius: 3px;
+}
+
+.ocmc-assistant .ocmc-bubble {
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  border-bottom-left-radius: 3px;
+}
+
+.ocmc-system .ocmc-bubble {
+  background: transparent;
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.ocmc-composer {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--background-modifier-border);
+  align-items: flex-end;
+}
+
+.ocmc-input {
+  flex: 1;
+  resize: none;
+}
+
+.ocmc-send {
+  flex-shrink: 0;
+}

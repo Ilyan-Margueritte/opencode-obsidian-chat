@@ -1,0 +1,153 @@
+import { describe, expect, test } from "bun:test"
+import {
+  ChatController,
+  contextToMessages,
+  entryRole,
+  entryText,
+  extractSessionId,
+  DEFAULT_MODEL,
+  DEFAULT_PORT,
+  baseUrlForPort,
+  probeServer,
+  parseServePassword,
+  basicAuthHeader,
+} from "../src/bridge"
+
+describe("bridge helpers", () => {
+  test("baseUrlForPort", () => {
+    expect(baseUrlForPort(17456)).toBe("http://127.0.0.1:17456")
+  })
+  test("extractSessionId prefers sessionID", () => {
+    expect(extractSessionId({ sessionID: "s1", id: "x" })).toBe("s1")
+    expect(extractSessionId({ id: "x" })).toBe("x")
+    expect(extractSessionId({})).toBeUndefined()
+  })
+  test("entryText from text field", () => {
+    expect(entryText({ text: "hi" })).toBe("hi")
+  })
+  test("entryText from content array", () => {
+    expect(entryText({ content: [{ type: "text", text: "a" }, { type: "text", text: "b" }] })).toBe("a\nb")
+  })
+  test("entryRole", () => {
+    expect(entryRole({ type: "user" })).toBe("user")
+    expect(entryRole({ type: "assistant" })).toBe("assistant")
+    expect(entryRole({ role: "system" })).toBe("system")
+  })
+  test("contextToMessages filters empty", () => {
+    const msgs = contextToMessages([{ id: "1", type: "user", text: "hi" }, { id: "2", type: "assistant", text: "   " }])
+    expect(msgs).toHaveLength(1)
+    expect(msgs[0].role).toBe("user")
+  })
+  test("defaults", () => {
+    expect(DEFAULT_PORT).toBe(17456)
+    expect(DEFAULT_MODEL.providerID).toBe("nvidia")
+    expect(DEFAULT_MODEL.id).toContain("nemotron")
+  })
+})
+
+describe("auth helpers", () => {
+  test("parseServePassword", () => {
+    const out = "server listening on http://127.0.0.1:17456\nserver password VevTRg_13JelIhwjyJ3YdTkH473Jn98VIprasZpleQ8\n"
+    expect(parseServePassword(out)).toBe("VevTRg_13JelIhwjyJ3YdTkH473Jn98VIprasZpleQ8")
+    expect(parseServePassword("server listening on http://x")).toBeUndefined()
+  })
+  test("basicAuthHeader is opencode:<password> base64", () => {
+    expect(basicAuthHeader("abc")).toBe(`Basic ${Buffer.from("opencode:abc", "binary").toString("base64")}`)
+  })
+})
+
+describe("probeServer", () => {
+  test("returns true when info succeeds", async () => {
+    const factory = () => ({ server: { info: async () => ({}) }, session: { create: async () => ({}) , prompt: async () => ({}), context: async () => ([]) } })
+    expect(await probeServer(factory as any, "http://x")).toBe("ok")
+  })
+  test("returns false when info throws", async () => {
+    const factory = () => ({ server: { info: async () => { throw new Error("no") } }, session: { create: async () => ({}) , prompt: async () => ({}), context: async () => ([]) } })
+    expect(await probeServer(factory as any, "http://x")).toBe("down")
+  })
+  test("detects unauthorized servers (tag or message)", async () => {
+    const tagErr = () => { const e = new Error("nope"); (e as any)._tag = "UnauthorizedError"; throw e }
+    const factory = () => ({ server: { info: async () => tagErr() }, session: { create: async () => ({}) , prompt: async () => ({}), context: async () => ([]) } })
+    expect(await probeServer(factory as any, "http://x")).toBe("unauthorized")
+    const factory2 = () => ({ server: { info: async () => { throw new Error("Authentication required") } }, session: { create: async () => ({}) , prompt: async () => ({}), context: async () => ([]) } })
+    expect(await probeServer(factory2 as any, "http://x")).toBe("unauthorized")
+  })
+  test("passes headers to the factory", async () => {
+    let seen: Record<string, string> | undefined
+    const factory = (_u: string, h?: Record<string, string>) => { seen = h; return { server: { info: async () => ({}) }, session: { create: async () => ({}) , prompt: async () => ({}), context: async () => ([]) } } }
+    await probeServer(factory as any, "http://x", { authorization: "Basic zz" })
+    expect(seen).toEqual({ authorization: "Basic zz" })
+  })
+})
+
+describe("ChatController", () => {
+  test("ensureSession creates and reuses", async () => {
+    const createCalls: any[] = []
+    const factory = () => ({
+      server: { info: async () => ({}) },
+      session: {
+        create: async (input: any) => { createCalls.push(input); return { sessionID: "sid-1" } },
+        prompt: async () => ({}),
+        context: async () => [{ type: "user", text: "hi" }, { type: "assistant", text: "hello" }],
+      },
+    })
+    const c = new ChatController(factory as any, { baseUrl: "http://x", agent: "memory", model: DEFAULT_MODEL })
+    expect(await c.ensureSession()).toBe("sid-1")
+    expect(await c.ensureSession()).toBe("sid-1")
+    expect(createCalls).toHaveLength(1)
+    expect(createCalls[0].agent).toBe("memory")
+    expect(createCalls[0].model).toEqual(DEFAULT_MODEL)
+  })
+  test("send polls until assistant reply", async () => {
+    let calls = 0
+    const factory = () => ({
+      server: { info: async () => ({}) },
+      session: {
+        create: async () => ({ sessionID: "sid-2" }),
+        prompt: async () => ({}),
+        context: async () => {
+          calls++
+          if (calls === 1) return [{ type: "user", text: "q" }]
+          if (calls === 2) return [{ type: "user", text: "q" }, { type: "assistant", text: "" }] // streaming, empty
+          return [{ type: "user", text: "q" }, { type: "assistant", text: "a" }, { type: "idle" }]
+        },
+      },
+    })
+    const c = new ChatController(factory as any, { baseUrl: "http://x", agent: "memory", model: DEFAULT_MODEL })
+    const msgs = await c.send("q")
+    expect(msgs.map((m) => m.role)).toEqual(["user", "assistant"])
+    expect(msgs[1].text).toBe("a")
+  })
+  test("send returns on idle even with partial text", async () => {
+    let calls = 0
+    const factory = () => ({
+      server: { info: async () => ({}) },
+      session: {
+        create: async () => ({ sessionID: "sid-4" }),
+        prompt: async () => ({}),
+        context: async () => {
+          calls++
+          if (calls === 1) return [{ type: "user", text: "q" }]
+          return [{ type: "user", text: "q" }, { type: "assistant", text: "" }, { type: "idle" }]
+        },
+      },
+    })
+    const c = new ChatController(factory as any, { baseUrl: "http://x", agent: "memory", model: DEFAULT_MODEL })
+    const msgs = await c.send("q")
+    expect(msgs).toHaveLength(1) // empty assistant is filtered out
+  })
+  test("reset clears session", async () => {
+    const factory = () => ({
+      server: { info: async () => ({}) },
+      session: {
+        create: async () => ({ sessionID: "sid-3" }),
+        prompt: async () => ({}),
+        context: async () => [],
+      },
+    })
+    const c = new ChatController(factory as any, { baseUrl: "http://x", agent: "memory", model: DEFAULT_MODEL })
+    await c.ensureSession()
+    c.reset()
+    expect(await c.history()).toEqual([])
+  })
+})

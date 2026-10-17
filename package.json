@@ -1,0 +1,21 @@
+{
+  "name": "opencode-memory-chat",
+  "version": "0.1.0",
+  "description": "Small Obsidian plugin: chat with the OpenCode memory agent (@memory) from a side panel. Auto-starts the OpenCode server if needed.",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --format=cjs --platform=node --target=es2022 --external:obsidian --external:electron --outfile=main.js",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "check": "bun run typecheck && bun run test && bun run build"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "esbuild": "^0.21.0",
+    "obsidian": "latest",
+    "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "@opencode/client": "^2.0.32"
+  }
+}
