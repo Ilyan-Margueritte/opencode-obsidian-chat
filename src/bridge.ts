@@ -60,6 +60,37 @@ export function parseServePassword(stdout: string): string | undefined {
 
 export type ServerState = "ok" | "unauthorized" | "down"
 
+export type ServerPlan =
+  | { action: "reuse"; port: number; password?: string }
+  | { action: "spawn"; port: number }
+  | { action: "fail" }
+
+/**
+ * Décision pure : réutiliser un serveur existant ou en démarrer un.
+ * - port de base sans auth → réutiliser ;
+ * - port de base + mot de passe mémorisé accepté → réutiliser (auth) ;
+ * - port occupé par un serveur au mot de passe inconnu (orphelin/étranger) →
+ *   port suivant ;
+ * - port libre → démarrer ici ;
+ * - tous occupés → échec explicite.
+ */
+export async function planServer(
+  probe: (port: number, password?: string) => Promise<ServerState>,
+  basePort: number,
+  savedPasswords: Record<string, string>,
+  maxOffsets = 5,
+): Promise<ServerPlan> {
+  for (let offset = 0; offset <= maxOffsets; offset++) {
+    const port = basePort + offset
+    const password = savedPasswords[String(port)]
+    const state = await probe(port, password)
+    if (state === "ok") return { action: "reuse", port, password }
+    if (state === "down") return { action: "spawn", port }
+    // "unauthorized" : serveur étranger ou mot de passe périmé → port suivant
+  }
+  return { action: "fail" }
+}
+
 /**
  * Reach an already-running server. Distinguishes a usable server ("ok"),
  * a foreign password-protected one ("unauthorized") and nothing ("down").
@@ -128,7 +159,7 @@ export function contextToMessages(ctx: Array<{ id?: string; type?: string; text?
 /** A chat controller: owns a client + a session. */
 export class ChatController {
   private client: OpenCodeClient
-  private sessionID: string | null = null
+  private sessionIDPrivate: string | null = null
   private readonly opts: BridgeOptions
 
   constructor(clientFactory: ClientFactory, opts: BridgeOptions) {
@@ -138,9 +169,17 @@ export class ChatController {
 
   get baseUrl(): string { return this.opts.baseUrl }
 
+  /** Current session id (null until created/resumed) — used for persistence. */
+  get sessionID(): string | null { return this.sessionIDPrivate }
+
+  /** Reattach to a previously persisted session (history restoration). */
+  async resumeSession(id: string): Promise<void> {
+    this.sessionIDPrivate = id
+  }
+
   /** Ensure a session exists (create if needed). Returns the session id. */
   async ensureSession(): Promise<string> {
-    if (this.sessionID) return this.sessionID
+    if (this.sessionIDPrivate) return this.sessionIDPrivate
     // The create payload is FLAT: { title?, agent?, model? } — `id` is the
     // session id itself (string), not an options object.
     const resp = await this.client.session.create({
@@ -150,12 +189,19 @@ export class ChatController {
     } as unknown as { id?: { title?: string; agent?: string; model?: ChatModel } })
     const id = extractSessionId(resp)
     if (!id) throw new Error("session creation returned no id")
-    this.sessionID = id
+    this.sessionIDPrivate = id
     return id
   }
 
   /** Reset the conversation (new session next time). */
-  reset(): void { this.sessionID = null }
+  reset(): void { this.sessionIDPrivate = null }
+
+  /** Re-read the transcript. */
+  async history(): Promise<ChatMessage[]> {
+    if (!this.sessionIDPrivate) return []
+    const ctx = await this.client.session.context({ sessionID: this.sessionIDPrivate })
+    return contextToMessages(ctx)
+  }
 
   /** Send a user message and wait for the assistant reply. Returns updated messages. */
   async send(text: string, timeoutMs = 120000): Promise<ChatMessage[]> {
@@ -179,13 +225,6 @@ export class ChatController {
     }
     // timeout: return whatever we have
     const ctx = await this.client.session.context({ sessionID: sid })
-    return contextToMessages(ctx)
-  }
-
-  /** Re-read the transcript. */
-  async history(): Promise<ChatMessage[]> {
-    if (!this.sessionID) return []
-    const ctx = await this.client.session.context({ sessionID: this.sessionID })
     return contextToMessages(ctx)
   }
 }

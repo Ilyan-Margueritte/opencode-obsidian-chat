@@ -1,15 +1,40 @@
-import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf } from "obsidian"
-import { spawn, ChildProcess } from "child_process"
+import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, requestUrl } from "obsidian"
+import { spawn, type ChildProcess } from "child_process"
+import { open as fsOpen, readFile } from "node:fs/promises"
+import { join } from "node:path"
 import { OpenCode } from "@opencode/client/promise"
-import { ChatController, probeServer, baseUrlForPort, DEFAULT_PORT, DESKTOP_CLI, parseServePassword, basicAuthHeader, type OpenCodeClient } from "./bridge"
+import {
+  ChatController,
+  parseServePassword,
+  planServer,
+  baseUrlForPort,
+  DEFAULT_PORT,
+  DEFAULT_MODEL,
+  DESKTOP_CLI,
+  type OpenCodeClient,
+} from "./bridge"
 
 const VIEW_TYPE = "opencode-memory-chat"
+
+/* Obsidian's renderer origin (app://obsidian.md) cannot reliably fetch
+   http://127.0.0.1 (cross-origin + CSP): route every SDK request through
+   Obsidian's requestUrl, which is exempt from those restrictions. */
+function obsidianFetch(): typeof fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url
+    const method = init?.method ?? "GET"
+    const headers = (init?.headers ?? undefined) as Record<string, string> | undefined
+    const body = typeof init?.body === "string" ? init.body : undefined
+    const r = await requestUrl({ url, method, headers, body, throw: false })
+    return new Response(r.text, { status: r.status, headers: r.headers })
+  }) as typeof fetch
+}
 
 /* The SDK client is structurally wider than the bridge's OpenCodeClient type
    (its request bodies accept optional / richer fields). A cast is safe: the
    bridge only calls the subset we typed. */
 const sdkFactory = (baseUrl: string, headers?: Record<string, string>): OpenCodeClient =>
-  OpenCode.make({ baseUrl, headers }) as unknown as OpenCodeClient
+  OpenCode.make({ baseUrl, headers, fetch: obsidianFetch() }) as unknown as OpenCodeClient
 
 interface Settings {
   port: number
@@ -20,22 +45,26 @@ interface Settings {
   autoStart: boolean
   /** server passwords learned from `serve` stdout, keyed by port */
   passwords: Record<string, string>
+  /** last chat session, restored on panel open */
+  lastSessionID: string
 }
 
 const DEFAULT_SETTINGS: Settings = {
   port: DEFAULT_PORT,
   cliPath: DESKTOP_CLI,
   agent: "memory",
-  modelProvider: "nvidia",
-  modelId: "nvidia/nemotron-3.5-super-vl-120b-a12b",
+  modelProvider: DEFAULT_MODEL.providerID,
+  modelId: DEFAULT_MODEL.id,
   autoStart: true,
   passwords: {},
+  lastSessionID: "",
 }
 
 export default class OpenCodeMemoryChatPlugin extends Plugin {
   settings: Settings = { ...DEFAULT_SETTINGS }
   private child: ChildProcess | null = null
   private controller: ChatController | null = null
+  private controllerKey = ""
 
   async onload() {
     await this.loadSettings()
@@ -46,8 +75,8 @@ export default class OpenCodeMemoryChatPlugin extends Plugin {
   }
 
   async onunload() {
-    // Leave the spawned server running: it is a local API server and the next
-    // Obsidian session reconnects instantly with the stored password.
+    // Leave the spawned server running: the next Obsidian session reconnects
+    // instantly with the stored password.
   }
 
   async activateView() {
@@ -58,75 +87,82 @@ export default class OpenCodeMemoryChatPlugin extends Plugin {
     workspace.revealLeaf(leaf)
   }
 
-  /** Spawn the CLI server on `port` and wait until it answers. */
   private vaultBasePath(): string | undefined {
     const adapter = this.app.vault.adapter as { basePath?: string } | undefined
     return adapter?.basePath
   }
 
+  /**
+   * Spawn the CLI server on `port`. The password printed on stdout is
+   * captured from a LOG FILE (Electron pipes proved unreliable) and saved as
+   * soon as it appears, so a later attempt can reconnect even if this one
+   * gives up.
+   */
   private async spawnServer(port: number): Promise<string | undefined> {
     if (this.child && !this.child.killed) this.child.kill()
-    this.child = spawn(this.settings.cliPath, ["serve", "--hostname", "127.0.0.1", "--port", String(port)], {
-      stdio: ["ignore", "pipe", "ignore"],
-      windowsHide: true,
-      cwd: this.vaultBasePath(),
+    const logFile = join(this.manifest.dir ?? this.app.vault.configDir, `serve-${port}.log`)
+    const out = await fsOpen(logFile, "w")
+    this.child = spawn(
+      this.settings.cliPath,
+      ["serve", "--hostname", "127.0.0.1", "--port", String(port), "--cors", "*"],
+      { stdio: ["ignore", out.fd, out.fd], windowsHide: true, cwd: this.vaultBasePath() },
+    )
+    await out.close() // the child owns its duplicated fd; close ours at once
+    this.child.on("error", (error) => {
+      console.error("[opencode-memory-chat] spawn error", error)
     })
-    let stdout = ""
-    this.child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString() })
-    const baseUrl = baseUrlForPort(port)
-    const deadline = Date.now() + 45000
-    while (Date.now() < deadline) {
-      const password = parseServePassword(stdout)
-      const headers = password ? { authorization: basicAuthHeader(password) } : undefined
-      if (await probeServer(sdkFactory, baseUrl, headers) === "ok") return password
-      await new Promise((r) => setTimeout(r, 800))
-    }
-    throw new Error(`OpenCode server did not become ready on port ${port}.`)
-  }
+    this.child.on("exit", (code) => {
+      if (code && code !== 0) console.error(`[opencode-memory-chat] server exited with code ${code} (voir ${logFile})`)
+    })
 
-  /**
-   * Find or start a usable server. Order:
-   * 1. configured port without auth (server started without a password),
-   * 2. configured port + stored password (our own previous server),
-   * 3. next ports (+1..+5) with their stored passwords,
-   * 4. spawn a fresh server on the configured port.
-   */
-  async ensureServer(): Promise<{ baseUrl: string; password?: string }> {
-    for (let offset = 0; offset <= 5; offset++) {
-      const port = this.settings.port + offset
-      const baseUrl = baseUrlForPort(port)
-      const state = await probeServer(sdkFactory, baseUrl)
-      if (state === "ok") return { baseUrl }
-      if (state === "unauthorized") {
-        const password = this.settings.passwords[String(port)]
-        if (password && await probeServer(sdkFactory, baseUrl, { authorization: basicAuthHeader(password) }) === "ok") {
-          return { baseUrl, password }
-        }
-        continue // foreign or stale server: try the next port
-      }
-      // "down": spawn here if auto-start is on and we are on the first port
-      if (!this.settings.autoStart) break
-      if (offset === 0) {
-        const password = await this.spawnServer(port)
-        if (password) {
+    const baseUrl = baseUrlForPort(port)
+    const deadline = Date.now() + 90000
+    while (Date.now() < deadline) {
+      // parse from the file — works regardless of Electron pipe buffering
+      try {
+        const text = await readFile(logFile, "utf8").catch(() => "")
+        const password = parseServePassword(text)
+        if (password && this.settings.passwords[String(port)] !== password) {
           this.settings.passwords[String(port)] = password
           await this.saveSettings()
         }
-        return { baseUrl, password }
-      }
+        const headers = password ? { authorization: basicAuth(password) } : undefined
+        if ((await probe(sdkFactory, baseUrl, headers)) === "ok") {
+          return password
+        }
+      } catch { /* keep polling */ }
+      await new Promise((r) => setTimeout(r, 800))
     }
-    throw new Error(`Aucun serveur OpenCode joignable (ports ${this.settings.port} à ${this.settings.port + 5}). Vérifiez le chemin du CLI dans les réglages.`)
+    throw new Error(`Le serveur OpenCode n'est pas devenu joignable sur le port ${port} (90 s). Logs : ${logFile}`)
+  }
+
+  /** Find or start a usable server (pure decision in bridge.planServer). */
+  async ensureServer(): Promise<{ baseUrl: string; password?: string }> {
+    const plan = await planServer(
+      async (port, password) => probe(sdkFactory, baseUrlForPort(port), password ? { authorization: basicAuth(password) } : undefined),
+      this.settings.port,
+      this.settings.passwords,
+    )
+    if (plan.action === "reuse") return { baseUrl: baseUrlForPort(plan.port), password: plan.password }
+    if (plan.action === "spawn") {
+      if (!this.settings.autoStart) throw new Error(`Aucun serveur OpenCode sur le port ${plan.port} et le démarrage automatique est désactivé.`)
+      const password = await this.spawnServer(plan.port)
+      return { baseUrl: baseUrlForPort(plan.port), password }
+    }
+    throw new Error(`Aucun serveur OpenCode joignable (ports ${this.settings.port} à ${this.settings.port + 5}) et tous sont occupés par des serveurs au mot de passe inconnu. Fermez l'ancien serveur ou changez le port dans les réglages.`)
   }
 
   async getController(): Promise<ChatController> {
-    if (this.controller) return this.controller
     const { baseUrl, password } = await this.ensureServer()
+    const key = `${baseUrl}|${password ?? ""}`
+    if (this.controller && this.controllerKey === key) return this.controller
     this.controller = new ChatController(sdkFactory, {
       baseUrl,
       password,
       agent: this.settings.agent,
       model: { providerID: this.settings.modelProvider, id: this.settings.modelId },
     })
+    this.controllerKey = key
     return this.controller
   }
 
@@ -137,6 +173,9 @@ export default class OpenCodeMemoryChatPlugin extends Plugin {
     await this.saveData(this.settings)
   }
 }
+
+/* Small local aliases to keep the call sites readable. */
+import { probeServer as probe, basicAuthHeader as basicAuth } from "./bridge"
 
 class ChatView extends ItemView {
   plugin: OpenCodeMemoryChatPlugin
@@ -173,12 +212,27 @@ class ChatView extends ItemView {
     this.inputEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); this.send() }
     })
-    // restore history if a session exists
-    try {
-      const c = await this.plugin.getController()
-      const msgs = await c.history()
-      for (const m of msgs) this.renderMessage(m.role, m.text)
-    } catch (e) { this.setStatus(String(e)) }
+
+    // Restore the last conversation (persisted session id).
+    if (this.plugin.settings.lastSessionID) {
+      this.setStatus("Reconnexion à la dernière discussion…")
+      try {
+        const c = await this.plugin.getController()
+        await c.resumeSession(this.plugin.settings.lastSessionID)
+        const msgs = await c.history()
+        if (msgs.length === 0) {
+          this.setStatus("Dernière discussion vide (session expirée ?) — nouvelle discussion prête.")
+          c.reset()
+          this.plugin.settings.lastSessionID = ""
+          await this.plugin.saveSettings()
+        } else {
+          for (const m of msgs) this.renderMessage(m.role, m.text)
+          this.setStatus("Discussion précédente restaurée.")
+        }
+      } catch (e) {
+        this.setStatus(String(e))
+      }
+    }
   }
 
   private setStatus(t: string) { this.statusEl.setText(t) }
@@ -189,13 +243,20 @@ class ChatView extends ItemView {
     this.messagesEl.scrollTop = this.messagesEl.scrollHeight
   }
 
-  async newChat() {
+  /** Nouvelle discussion : reset IMMÉDIAT de l'UI, sans exiger le serveur. */
+  private async newChat() {
+    this.messagesEl.empty()
+    this.plugin.settings.lastSessionID = ""
+    await this.plugin.saveSettings().catch(() => {})
     try {
       const c = await this.plugin.getController()
       c.reset()
-      this.messagesEl.empty()
-      this.setStatus("Nouvelle discussion.")
-    } catch (e) { this.setStatus(String(e)) }
+    } catch (e) {
+      // pas de serveur : peu importe, le reset UI est déjà fait
+      this.setStatus("Nouvelle discussion (serveur pas encore joignable — il démarrera au premier message).")
+      return
+    }
+    this.setStatus("Nouvelle discussion.")
   }
 
   async send() {
@@ -209,9 +270,13 @@ class ChatView extends ItemView {
     try {
       const c = await this.plugin.getController()
       const msgs = await c.send(text)
-      // render only the new assistant reply (last assistant message not already shown)
       const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant")
       if (lastAssistant) this.renderMessage("assistant", lastAssistant.text)
+      else this.renderMessage("system", "(réponse vide — voir les réglages de modèle)")
+      if (c.sessionID) {
+        this.plugin.settings.lastSessionID = c.sessionID
+        await this.plugin.saveSettings()
+      }
       this.setStatus("Prêt.")
     } catch (e) {
       this.setStatus(`Erreur : ${String(e)}`)

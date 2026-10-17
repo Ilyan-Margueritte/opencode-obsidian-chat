@@ -11,6 +11,7 @@ import {
   probeServer,
   parseServePassword,
   basicAuthHeader,
+  planServer,
 } from "../src/bridge"
 
 describe("bridge helpers", () => {
@@ -42,6 +43,46 @@ describe("bridge helpers", () => {
     expect(DEFAULT_PORT).toBe(17456)
     expect(DEFAULT_MODEL.providerID).toBe("nvidia")
     expect(DEFAULT_MODEL.id).toContain("nemotron")
+  })
+})
+
+describe("planServer (décision pure : réutiliser ou démarrer un serveur)", () => {
+  const probeOf = (table: Record<number, "ok" | "unauthorized" | "down">) =>
+    async (port: number) => table[port] ?? "down"
+
+  test("serveur sans mot de passe déjà lancé → réutilise", async () => {
+    const plan = await planServer(probeOf({ 17456: "ok" }), 17456, {})
+    expect(plan).toEqual({ action: "reuse", port: 17456 })
+  })
+
+  test("notre ancien serveur (mot de passe mémorisé) → réutilise avec le mot de passe", async () => {
+    const seen: Array<string | undefined> = []
+    const plan = await planServer(
+      async (port, password) => { seen.push(password); return password ? "ok" : "unauthorized" },
+      17456,
+      { "17456": "secret" },
+    )
+    expect(plan).toEqual({ action: "reuse", port: 17456, password: "secret" })
+    expect(seen).toEqual(["secret"])
+  })
+
+  test("port occupé par un serveur étranger → démarre sur le port suivant", async () => {
+    const plan = await planServer(
+      async (port) => (port === 17456 ? "unauthorized" : "down"),
+      17456,
+      {},
+    )
+    expect(plan).toEqual({ action: "spawn", port: 17457 })
+  })
+
+  test("rien ne tourne → démarre sur le port de base", async () => {
+    const plan = await planServer(probeOf({}), 17456, {})
+    expect(plan).toEqual({ action: "spawn", port: 17456 })
+  })
+
+  test("tous les ports occupés par des serveurs étrangers → échec explicite", async () => {
+    const plan = await planServer(async () => "unauthorized", 17456, {})
+    expect(plan).toEqual({ action: "fail" })
   })
 })
 
@@ -149,5 +190,41 @@ describe("ChatController", () => {
     await c.ensureSession()
     c.reset()
     expect(await c.history()).toEqual([])
+  })
+
+  test("resumeSession reprend la session sauvegardée sans en créer une nouvelle", async () => {
+    let creates = 0
+    const factory = () => ({
+      server: { info: async () => ({}) },
+      session: {
+        create: async () => { creates++; return { sessionID: "sid-new" } },
+        prompt: async () => ({}),
+        context: async () => [{ type: "user", text: "ancien message" }, { type: "assistant", text: "ancienne réponse" }],
+      },
+    })
+    const c = new ChatController(factory as any, { baseUrl: "http://x", agent: "memory", model: DEFAULT_MODEL })
+    await c.resumeSession("ses_saved")
+    expect(c.sessionID).toBe("ses_saved")
+    const history = await c.history()
+    expect(history).toHaveLength(2)
+    expect(history[0].text).toBe("ancien message")
+    // ensureSession ne doit PAS créer une nouvelle session
+    expect(await c.ensureSession()).toBe("ses_saved")
+    expect(creates).toBe(0)
+  })
+
+  test("expose la session courante pour la persistance", async () => {
+    const factory = () => ({
+      server: { info: async () => ({}) },
+      session: {
+        create: async () => ({ sessionID: "sid-5" }),
+        prompt: async () => ({}),
+        context: async () => [],
+      },
+    })
+    const c = new ChatController(factory as any, { baseUrl: "http://x", agent: "memory", model: DEFAULT_MODEL })
+    expect(c.sessionID).toBeNull()
+    await c.ensureSession()
+    expect(c.sessionID).toBe("sid-5")
   })
 })
