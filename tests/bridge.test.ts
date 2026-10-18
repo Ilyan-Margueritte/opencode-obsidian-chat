@@ -258,6 +258,69 @@ describe("ChatController", () => {
     const msgs = await c.send("q")
     expect(msgs).toHaveLength(1) // empty assistant is filtered out
   })
+  test("send sur une session réutilisée attend le NOUVEAU tour (bug de la réponse dupliquée, 2026-10-18)", async () => {
+    const OLD = [
+      { type: "user", text: "q1" },
+      { type: "assistant", content: [{ type: "reasoning", text: "réflexion" }, { type: "text", text: "r1" }] },
+      { type: "idle" },
+    ]
+    let calls = 0
+    const factory = () => ({
+      server: { info: async () => ({}) },
+      session: {
+        create: async () => ({ sessionID: "sid-reuse" }),
+        prompt: async () => ({}),
+        context: async () => {
+          calls++
+          if (calls === 1) return OLD // capture de « before » avant le prompt
+          if (calls === 2) return [...OLD, { type: "user", text: "q2" }] // le tour démarre seulement
+          if (calls === 3)
+            return [
+              ...OLD,
+              { type: "user", text: "q2" },
+              { type: "assistant", content: [{ type: "reasoning", text: "je réfléchis encore" }] },
+            ]
+          return [
+            ...OLD,
+            { type: "user", text: "q2" },
+            { type: "assistant", content: [{ type: "reasoning", text: "je réfléchis encore" }, { type: "text", text: "r2" }] },
+            { type: "idle" },
+          ]
+        },
+      },
+    })
+    const c = new ChatController(factory as any, { baseUrl: "http://x", agent: "memory", model: DEFAULT_MODEL })
+    await c.resumeSession("ses-old")
+    const msgs = await c.send("q2")
+    const last = [...msgs].reverse().find((m) => m.role === "assistant")
+    expect(last?.text).toBe("r2")
+  })
+  test("contextToMessages ne garde que la réponse finale du tour (pas les narrations intermédiaires, 2026-10-18)", () => {
+    const ctx = [
+      { type: "user", text: "question" },
+      { type: "assistant", content: [{ type: "reasoning", text: "je réfléchis" }, { type: "tool", text: "" }] },
+      {
+        type: "assistant",
+        content: [
+          { type: "reasoning", text: "…" },
+          { type: "text", text: "Je vais d'abord vérifier." },
+          { type: "tool", text: "" },
+        ],
+      },
+      { type: "assistant", content: [{ type: "reasoning", text: "…" }, { type: "text", text: "Voici la vraie réponse." }] },
+      { type: "idle" },
+      { type: "user", text: "deuxième question" },
+      { type: "assistant", content: [{ type: "text", text: "Deuxième réponse." }] },
+      { type: "idle" },
+    ]
+    const msgs = contextToMessages(ctx as any)
+    expect(msgs.map((m) => [m.role, m.text])).toEqual([
+      ["user", "question"],
+      ["assistant", "Voici la vraie réponse."],
+      ["user", "deuxième question"],
+      ["assistant", "Deuxième réponse."],
+    ])
+  })
   test("reset clears session", async () => {
     const factory = () => ({
       server: { info: async () => ({}) },

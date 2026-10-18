@@ -202,11 +202,32 @@ export function entryRole(entry: { type?: string; role?: string }): "user" | "as
 /** Convert a session context into chat messages. */
 export function contextToMessages(ctx: Array<{ id?: string; type?: string; text?: string; role?: string; content?: unknown }>): ChatMessage[] {
   const out: ChatMessage[] = []
+  // Un tour = [message utilisateur, …entrées assistant…, idle]. Les entrées
+  // assistant intermédiaires contiennent des narrations (« Je vais d'abord
+  // vérifier… ») émises avant des appels d'outils ; seule la DERNIÈRE entrée
+  // textuelle du tour est la réponse à afficher. Piège vécu (2026-10-18) :
+  // la narration s'affichait comme un message à part entière en plus de la
+  // réponse.
+  let pending: ChatMessage | null = null
+  const flush = () => {
+    if (pending) out.push(pending)
+    pending = null
+  }
   for (const e of ctx) {
+    if (String(e.type ?? "") === "idle") {
+      flush()
+      continue
+    }
     const text = entryText(e)
     if (!text.trim()) continue
+    if (entryRole(e) === "assistant") {
+      pending = { role: "assistant", text, id: e.id }
+      continue
+    }
+    flush()
     out.push({ role: entryRole(e), text, id: e.id })
   }
+  flush()
   return out
 }
 
@@ -262,19 +283,17 @@ export class ChatController {
     const sid = await this.ensureSession()
     const before = (await this.client.session.context({ sessionID: sid })).length
     await this.client.session.prompt({ sessionID: sid, text })
-    // Poll until the turn COMPLETES: the context grows and an "idle" entry
-    // appears when generation ends (an [assistant] entry exists from the first
-    // streamed token — waiting on it alone returns an empty reply).
+    // Poll until the turn COMPLETES: a NEW "idle" entry must appear AFTER the
+    // prompt. Piège vécu (2026-10-18, « réponse dupliquée » dans le panneau) :
+    // sur une session RÉUTILISÉE, le contexte contient encore l'entrée "idle"
+    // ET la réponse du tour précédent — les chercher dans tout le contexte
+    // rendait la main dès le premier sondage et le panneau réaffichait
+    // l'ANCIENNE réponse. On ne regarde donc que ctx.slice(before).
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
       const ctx = await this.client.session.context({ sessionID: sid })
-      const grew = ctx.length > before
-      const idle = ctx.some((e) => String(e.type ?? "") === "idle")
-      if (grew && idle) return contextToMessages(ctx)
-      if (grew) {
-        const lastAssistant = [...ctx].reverse().find((e) => entryRole(e) === "assistant")
-        if (lastAssistant && entryText(lastAssistant).trim()) return contextToMessages(ctx)
-      }
+      const fresh = ctx.slice(before)
+      if (fresh.some((e) => String(e.type ?? "") === "idle")) return contextToMessages(ctx)
       await new Promise((r) => setTimeout(r, 600))
     }
     // timeout: return whatever we have

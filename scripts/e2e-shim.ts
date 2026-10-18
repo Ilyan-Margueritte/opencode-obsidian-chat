@@ -128,19 +128,43 @@ try {
   const session = await client.session.create({ title: "E2E shim", agent: "memory", model: MODEL })
   const sessionID = session.sessionID ?? session.id
   console.log("SESSION:", sessionID)
-  await client.session.prompt({ sessionID, text: "Bonjour. Réponds en une phrase en français et cite UN fait de mon coffre." })
-  let transcript: any[] = []
-  const deadline = Date.now() + 150000
-  while (Date.now() < deadline) {
-    transcript = await client.session.context({ sessionID })
-    if (transcript.some((m: any) => String(m.type ?? "") === "idle")) break
-    await Bun.sleep(1000)
+
+  // Comme le plugin (send()) : ne compter que les entrées APPARUES depuis le
+  // prompt. Une session RÉUTILISÉE garde l'entrée "idle" du tour précédent —
+  // la chercher dans tout le contexte rendait la main trop tôt et le panneau
+  // réaffichait l'ancienne réponse (capture utilisateur du 2026-10-18).
+  const waitTurn = async (fromLength: number) => {
+    const deadline = Date.now() + 150000
+    let transcript: any[] = []
+    while (Date.now() < deadline) {
+      transcript = await client.session.context({ sessionID })
+      if (transcript.slice(fromLength).some((m: any) => String(m.type ?? "") === "idle")) break
+      await Bun.sleep(1000)
+    }
+    return transcript
   }
-  const messages = contextToMessages(transcript)
+
+  const before1 = (await client.session.context({ sessionID })).length
+  await client.session.prompt({ sessionID, text: "Bonjour. Réponds en une phrase en français et cite UN fait de mon coffre." })
+  const t1 = await waitTurn(before1)
+  const messages = contextToMessages(t1)
   const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant")
   const text = lastAssistant?.text ?? ""
   console.log("REPLY:", String(text).slice(0, 300))
   console.log(String(text).trim() ? "E2E_OK" : "E2E_OK_EMPTY")
+
+  // 4. LE scénario EXACT de l'utilisateur : un SECOND message dans la MÊME
+  // session réutilisée. La réponse 2 doit être distincte de la réponse 1.
+  const before2 = t1.length
+  await client.session.prompt({ sessionID, text: "Deuxième message. Réponds uniquement par le mot : BANANE." })
+  const t2 = await waitTurn(before2)
+  const messages2 = contextToMessages(t2)
+  const last2 = [...messages2].reverse().find((m) => m.role === "assistant")
+  const text2 = last2?.text ?? ""
+  console.log("REPLY2:", String(text2).slice(0, 300))
+  const distinct = String(text2).trim() !== "" && text2.trim() !== text.trim()
+  console.log("E2E_REUSE:", distinct ? "DISTINCT_OK" : "DUPLIQUE (bug non corrigé)")
+  console.log("E2E_REUSE_KEYWORD:", /banane/i.test(text2) ? "BANANE_OK" : "BANANE_ABSENTE")
 } finally {
   cleanup()
 }
