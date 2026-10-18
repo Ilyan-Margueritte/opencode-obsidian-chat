@@ -1,7 +1,7 @@
 {
   "id": "opencode-memory-chat",
   "name": "OpenCode Memory Chat",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "minAppVersion": "1.5.0",
   "description": "Chat with the OpenCode memory agent (@memory) from a side panel. Auto-starts the OpenCode server if needed.",
   "author": "Ilyan Margueritte",

@@ -178,7 +178,11 @@ export function extractSessionId(resp: { sessionID?: string; id?: string }): str
 export function entryText(entry: { text?: string; content?: unknown }): string {
   if (typeof entry.text === "string" && entry.text.length) return entry.text
   if (Array.isArray(entry.content)) {
+    // PIÈGE VÉCU (2026-10-18) : les entrées assistant contiennent AUSSI des
+    // parties {type:"reasoning"} (réflexion interne) et {type:"tool"}. Les
+    // concaténer affichait le brouillon du modèle au lieu de sa réponse.
     return entry.content
+      .filter((p: any) => !p?.type || p.type === "text")
       .map((p: any) => (p && typeof p.text === "string" ? p.text : ""))
       .filter(Boolean)
       .join("\n")

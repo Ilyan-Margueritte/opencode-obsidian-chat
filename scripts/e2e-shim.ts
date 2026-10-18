@@ -11,6 +11,7 @@ import { dirname, join } from "node:path"
 import { OpenCode } from "@opencode/client/promise"
 import {
   basicAuthHeader,
+  contextToMessages,
   normalizeHeaders,
   parseServePassword,
   planServer,
@@ -135,11 +136,9 @@ try {
     if (transcript.some((m: any) => String(m.type ?? "") === "idle")) break
     await Bun.sleep(1000)
   }
-  const lastAssistant = [...transcript].reverse().find((m: any) => String(m.type ?? "").includes("assistant"))
-  const text = lastAssistant
-    ? (typeof lastAssistant.text === "string" && lastAssistant.text) ||
-      (lastAssistant.content ?? []).map((p: any) => p?.text ?? "").filter(Boolean).join(" ")
-    : ""
+  const messages = contextToMessages(transcript)
+  const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant")
+  const text = lastAssistant?.text ?? ""
   console.log("REPLY:", String(text).slice(0, 300))
   console.log(String(text).trim() ? "E2E_OK" : "E2E_OK_EMPTY")
 } finally {

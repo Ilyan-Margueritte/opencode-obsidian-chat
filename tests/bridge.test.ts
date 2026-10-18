@@ -34,6 +34,22 @@ describe("bridge helpers", () => {
   test("entryText from content array", () => {
     expect(entryText({ content: [{ type: "text", text: "a" }, { type: "text", text: "b" }] })).toBe("a\nb")
   })
+  test("entryText ignore la réflexion interne (parties reasoning/tool) — bug d'affichage du 2026-10-18", () => {
+    expect(
+      entryText({
+        type: "assistant",
+        content: [
+          { type: "reasoning", text: "je réfléchis tout haut…" },
+          { type: "tool", text: "résultat d'outil" },
+          { type: "text", text: "Voici la réponse finale." },
+        ],
+      }),
+    ).toBe("Voici la réponse finale.")
+  })
+  test("entryText d'une entrée sans partie textuelle → vide (elle sera ignorée)", () => {
+    expect(entryText({ type: "assistant", content: [{ type: "reasoning", text: "blabla" }] })).toBe("")
+    expect(entryText({ type: "assistant", content: [{ type: "tool", text: "tool output" }] })).toBe("")
+  })
   test("entryRole", () => {
     expect(entryRole({ type: "user" })).toBe("user")
     expect(entryRole({ type: "assistant" })).toBe("assistant")
