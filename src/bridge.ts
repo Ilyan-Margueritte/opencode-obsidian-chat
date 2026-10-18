@@ -2,6 +2,8 @@
    Everything that talks to the OpenCode server lives here; the Obsidian view
    (main.ts) only calls these functions. */
 
+import { join } from "node:path"
+
 export type ServerInfo = { version?: string; name?: string }
 
 export type ChatModel = { providerID: string; id: string; variant?: string }
@@ -117,6 +119,21 @@ export async function probeServer(
 /** Build the base URL from a port. */
 export function baseUrlForPort(port: number): string {
   return `http://127.0.0.1:${port}`
+}
+
+/* PIÈGE (vécu le 2026-10-18) : ObsidianPluginManifest.dir est un chemin
+   RELATIF au vault (« .obsidian/plugins/<id> »). Utilisé tel quel avec fs, il
+   se résout contre le dossier de l'appli Obsidian (process.cwd()) → ENOENT.
+   Toujours reconstruire un chemin absolu depuis le basePath du vault. */
+
+/** Absolute directory of this plugin inside a vault. */
+export function pluginFolderPath(vaultBasePath: string, configDir: string, pluginId: string): string {
+  return join(vaultBasePath, configDir, "plugins", pluginId)
+}
+
+/** Absolute path of the serve log file (inside the plugin folder). */
+export function serveLogPath(pluginFolder: string, port: number): string {
+  return join(pluginFolder, `serve-${port}.log`)
 }
 
 /** Pick the session id from a create() response (field name varies). */

@@ -1,13 +1,16 @@
 import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, requestUrl } from "obsidian"
 import { spawn, type ChildProcess } from "child_process"
+import { mkdirSync } from "node:fs"
 import { open as fsOpen, readFile } from "node:fs/promises"
-import { join } from "node:path"
+import { tmpdir } from "node:os"
 import { OpenCode } from "@opencode/client/promise"
 import {
   ChatController,
   parseServePassword,
   planServer,
   baseUrlForPort,
+  pluginFolderPath,
+  serveLogPath,
   DEFAULT_PORT,
   DEFAULT_MODEL,
   DESKTOP_CLI,
@@ -93,6 +96,18 @@ export default class OpenCodeMemoryChatPlugin extends Plugin {
   }
 
   /**
+   * Absolute folder of THIS plugin inside the vault. `manifest.dir` from
+   * Obsidian is VAULT-RELATIVE (e.g. ".obsidian/plugins/<id>") — used as-is
+   * with fs it resolves against the Obsidian app folder and opens ENOENT
+   * (bug vécu le 2026-10-18). We rebuild an absolute path from the vault's
+   * real base path; tmpdir only as a last-resort fallback.
+   */
+  private pluginFolder(): string {
+    const base = this.vaultBasePath()
+    return base ? pluginFolderPath(base, this.app.vault.configDir, this.manifest.id) : tmpdir()
+  }
+
+  /**
    * Spawn the CLI server on `port`. The password printed on stdout is
    * captured from a LOG FILE (Electron pipes proved unreliable) and saved as
    * soon as it appears, so a later attempt can reconnect even if this one
@@ -100,8 +115,15 @@ export default class OpenCodeMemoryChatPlugin extends Plugin {
    */
   private async spawnServer(port: number): Promise<string | undefined> {
     if (this.child && !this.child.killed) this.child.kill()
-    const logFile = join(this.manifest.dir ?? this.app.vault.configDir, `serve-${port}.log`)
-    const out = await fsOpen(logFile, "w")
+    const folder = this.pluginFolder()
+    mkdirSync(folder, { recursive: true })
+    const logFile = serveLogPath(folder, port)
+    let out
+    try {
+      out = await fsOpen(logFile, "w")
+    } catch (error) {
+      throw new Error(`Impossible d'ouvrir le fichier de log « ${logFile} » : ${error instanceof Error ? error.message : String(error)}`)
+    }
     this.child = spawn(
       this.settings.cliPath,
       ["serve", "--hostname", "127.0.0.1", "--port", String(port), "--cors", "*"],

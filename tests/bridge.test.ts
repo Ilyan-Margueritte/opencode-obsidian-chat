@@ -12,7 +12,10 @@ import {
   parseServePassword,
   basicAuthHeader,
   planServer,
+  pluginFolderPath,
+  serveLogPath,
 } from "../src/bridge"
+import { isAbsolute, join } from "node:path"
 
 describe("bridge helpers", () => {
   test("baseUrlForPort", () => {
@@ -83,6 +86,22 @@ describe("planServer (décision pure : réutiliser ou démarrer un serveur)", ()
   test("tous les ports occupés par des serveurs étrangers → échec explicite", async () => {
     const plan = await planServer(async () => "unauthorized", 17456, {})
     expect(plan).toEqual({ action: "fail" })
+  })
+})
+
+describe("chemins de fichiers (manifest.dir est RELATIF : bug ENOENT du 2026-10-18)", () => {
+  test("pluginFolderPath reconstruit un chemin ABSOLU depuis le basePath du vault", () => {
+    const base = process.platform === "win32" ? "C:\\Users\\x\\Documents\\obsidian\\opencode-memory" : "/home/x/opencode-memory"
+    const p = pluginFolderPath(base, ".obsidian", "opencode-memory-chat")
+    expect(isAbsolute(p)).toBe(true)
+    expect(p).toBe(join(base, ".obsidian", "plugins", "opencode-memory-chat"))
+  })
+
+  test("serveLogPath place le log DANS le dossier du plugin (jamais relatif à l'appli Obsidian)", () => {
+    const dir = join("C:\\vault", ".obsidian", "plugins", "opencode-memory-chat")
+    const log = serveLogPath(dir, 17456)
+    expect(isAbsolute(log)).toBe(true)
+    expect(log).toBe(join(dir, "serve-17456.log"))
   })
 })
 
