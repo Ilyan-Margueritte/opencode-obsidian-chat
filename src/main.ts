@@ -376,8 +376,15 @@ class ChatView extends ItemView {
     const text = this.inputEl.value.trim()
     if (!text) return
     // Commande connue du serveur → exécution réelle ; sinon message normal
-    // (compatibilité : « /quelque chose » inconnu part comme avant).
-    const command = parseCommandInput(text)
+    // (compatibilité : « /quelque chose » inconnu part comme avant). Si le
+    // texte ressemble à une commande mais que la liste peut être périmée ou
+    // vide (serveur qui vient de démarrer), on la recharge d'abord : taper
+    // /dream pendant le spawn ne doit PAS partir en message normal.
+    let command = parseCommandInput(text)
+    if (command && (this.commands.length === 0 || Date.now() - this.commandsFetchedAt > COMMAND_TTL_MS)) {
+      await this.loadCommands()
+      command = parseCommandInput(text)
+    }
     if (command && this.commands.some((c) => c.name === command.name)) {
       await this.runCommand(command.name, command.args, text)
       return
