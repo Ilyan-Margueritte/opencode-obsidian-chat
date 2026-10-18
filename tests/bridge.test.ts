@@ -15,6 +15,7 @@ import {
   pluginFolderPath,
   serveLogPath,
   serveLogCandidates,
+  normalizeHeaders,
 } from "../src/bridge"
 import { isAbsolute, join } from "node:path"
 
@@ -123,6 +124,30 @@ describe("serveLogCandidates (le log doit TOUJOURS être écrivable : dossier pl
   test("dossier plugin identique à tmpdir → aucun doublon", () => {
     const list = serveLogCandidates("C:\\Temp", "C:\\Temp", 17456)
     expect(list).toEqual([join("C:\\Temp", "serve-17456.log")])
+  })
+})
+
+describe("normalizeHeaders (le SDK passe une instance Headers ; requestUrl exige un Record simple)", () => {
+  test("objet simple → cloné tel quel", () => {
+    expect(normalizeHeaders({ authorization: "Basic x" })).toEqual({ authorization: "Basic x" })
+  })
+
+  test("instance Headers → Record complet (bug 401 vécu le 2026-10-18)", () => {
+    const h = new Headers()
+    h.set("authorization", "Basic b3BlbmNvZGU6c2VjcmV0")
+    h.set("content-type", "application/json")
+    expect(normalizeHeaders(h as unknown as HeadersInit)).toEqual({
+      authorization: "Basic b3BlbmNvZGU6c2VjcmV0",
+      "content-type": "application/json",
+    })
+  })
+
+  test("tableau de paires → Record", () => {
+    expect(normalizeHeaders([["a", "1"], ["b", "2"]] as unknown as HeadersInit)).toEqual({ a: "1", b: "2" })
+  })
+
+  test("undefined → objet vide", () => {
+    expect(normalizeHeaders(undefined)).toEqual({})
   })
 })
 

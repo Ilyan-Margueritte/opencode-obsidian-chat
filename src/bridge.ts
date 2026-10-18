@@ -137,6 +137,26 @@ export function serveLogPath(pluginFolder: string, port: number): string {
 }
 
 /**
+ * Normalise les en-têtes d'une requête fetch en Record simple.
+ * PIÈGE VÉCU (2026-10-18) : le SDK OpenCode passe une INSTANCE Headers ;
+ * transmise telle quelle à requestUrl (qui attend un Record), elle est
+ * silencieusement ignorée → toutes les requêtes partent sans Authorization
+ * → 401 partout (« serveur pas joignable » alors qu'il tourne).
+ */
+export function normalizeHeaders(headers: HeadersInit | undefined): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (!headers) return out
+  if (typeof (headers as Headers).forEach === "function" && !Array.isArray(headers)) {
+    (headers as Headers).forEach((value, key) => { out[key] = value })
+  } else if (Array.isArray(headers)) {
+    for (const [key, value] of headers) out[key] = value
+  } else {
+    Object.assign(out, headers as Record<string, string>)
+  }
+  return out
+}
+
+/**
  * Candidate log paths, best first: inside the plugin folder, then the OS temp
  * directory. The caller tries each in order — the log MUST be openable, or we
  * cannot capture the server password.

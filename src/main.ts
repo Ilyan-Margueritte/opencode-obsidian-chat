@@ -1,8 +1,8 @@
 import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, requestUrl } from "obsidian"
 import { spawn, type ChildProcess } from "child_process"
-import { mkdirSync } from "node:fs"
+import { appendFileSync, mkdirSync } from "node:fs"
 import { open as fsOpen, readFile, type FileHandle } from "node:fs/promises"
-import { dirname } from "node:path"
+import { dirname, join } from "node:path"
 import { tmpdir } from "node:os"
 import { OpenCode } from "@opencode/client/promise"
 import {
@@ -12,6 +12,7 @@ import {
   baseUrlForPort,
   pluginFolderPath,
   serveLogCandidates,
+  normalizeHeaders,
   DEFAULT_PORT,
   DEFAULT_MODEL,
   DESKTOP_CLI,
@@ -20,6 +21,15 @@ import {
 
 const VIEW_TYPE = "opencode-memory-chat"
 
+/* Piste de diagnostic HORS du vault (jamais de fichier chez l'utilisateur,
+   jamais bloquante) : %TEMP%\opencode-memory-chat.log. Sert à vérifier de
+   l'extérieur quelle version du plugin est réellement chargée dans Obsidian. */
+function trail(line: string): void {
+  try {
+    appendFileSync(join(tmpdir(), "opencode-memory-chat.log"), `${new Date().toISOString()} ${line}\n`)
+  } catch { /* le diagnostic ne doit jamais bloquer le plugin */ }
+}
+
 /* Obsidian's renderer origin (app://obsidian.md) cannot reliably fetch
    http://127.0.0.1 (cross-origin + CSP): route every SDK request through
    Obsidian's requestUrl, which is exempt from those restrictions. */
@@ -27,7 +37,10 @@ function obsidianFetch(): typeof fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url
     const method = init?.method ?? "GET"
-    const headers = (init?.headers ?? undefined) as Record<string, string> | undefined
+    // Le SDK passe une instance Headers : requestUrl attend un Record simple
+    // et l'ignore silencieusement sinon → plus d'Authorization → 401 partout
+    // (bug vécu le 2026-10-18 : « serveur pas joignable » alors qu'il tourne).
+    const headers = normalizeHeaders(init?.headers)
     const body = typeof init?.body === "string" ? init.body : undefined
     const r = await requestUrl({ url, method, headers, body, throw: false })
     return new Response(r.text, { status: r.status, headers: r.headers })
@@ -72,10 +85,21 @@ export default class OpenCodeMemoryChatPlugin extends Plugin {
 
   async onload() {
     await this.loadSettings()
+    trail(`onload version=${this.manifest.version} basePath=${this.vaultBasePath() ?? "(inconnu)"} configDir=${this.app.vault.configDir} manifestDir=${this.manifest.dir ?? "(absent)"} pluginFolder=${this.pluginFolder() ?? "(inconnu)"} port=${this.settings.port} logCandidats=[${serveLogCandidates(this.pluginFolder(), tmpdir(), this.settings.port).join(" | ")}]`)
     this.registerView(VIEW_TYPE, (leaf) => new ChatView(leaf, this))
     this.addRibbonIcon("brain", "OpenCode Memory Chat", () => this.activateView())
     this.addCommand({ id: "open-chat", name: "Open memory chat", callback: () => this.activateView() })
     this.addSettingTab(new ChatSettingTab(this.app, this))
+    // Pré-chauffage : si un serveur tourne déjà on s'y reconnecte, sinon on le
+    // démarre immédiatement — le premier message du panneau ne fait plus
+    // qu'attendre la réponse de l'agent.
+    if (this.settings.autoStart) {
+      setTimeout(() => {
+        this.getController()
+          .then((c) => trail(`préchauffage OK baseUrl=${c.baseUrl}`))
+          .catch((e) => trail(`préchauffage ÉCHEC : ${e instanceof Error ? e.message : String(e)}`))
+      }, 2500)
+    }
   }
 
   async onunload() {
@@ -125,7 +149,9 @@ export default class OpenCodeMemoryChatPlugin extends Plugin {
         lastError = error
       }
     }
-    throw new Error(`Impossible d'ouvrir un fichier de log pour le serveur (essayé : ${candidates.join(" ; ")}) : ${lastError instanceof Error ? lastError.message : String(lastError)}`)
+    const msg = `Impossible d'ouvrir un fichier de log pour le serveur (essayé : ${candidates.join(" ; ")}) : ${lastError instanceof Error ? lastError.message : String(lastError)}`
+    trail(`ÉCHEC ouverture log : ${msg}`)
+    throw new Error(msg)
   }
 
   /**
@@ -137,6 +163,7 @@ export default class OpenCodeMemoryChatPlugin extends Plugin {
   private async spawnServer(port: number): Promise<string | undefined> {
     if (this.child && !this.child.killed) this.child.kill()
     const { path: logFile, handle: out } = await this.openServeLog(port)
+    trail(`spawn port=${String(port)} cli=${this.settings.cliPath} log=${logFile}`)
     this.child = spawn(
       this.settings.cliPath,
       ["serve", "--hostname", "127.0.0.1", "--port", String(port), "--cors", "*"],
@@ -152,6 +179,7 @@ export default class OpenCodeMemoryChatPlugin extends Plugin {
 
     const baseUrl = baseUrlForPort(port)
     const deadline = Date.now() + 90000
+    let lastState = ""
     while (Date.now() < deadline) {
       // parse from the file — works regardless of Electron pipe buffering
       try {
@@ -160,19 +188,42 @@ export default class OpenCodeMemoryChatPlugin extends Plugin {
         if (password && this.settings.passwords[String(port)] !== password) {
           this.settings.passwords[String(port)] = password
           await this.saveSettings()
+          trail(`mot de passe capturé (port ${String(port)}, enregistré dans data.json)`)
         }
         const headers = password ? { authorization: basicAuth(password) } : undefined
-        if ((await probe(sdkFactory, baseUrl, headers)) === "ok") {
+        const state = await probe(sdkFactory, baseUrl, headers)
+        if (state !== lastState) {
+          trail(`probe port ${String(port)} : ${state}`)
+          lastState = state
+        }
+        if (state === "ok") {
+          trail(`serveur prêt sur le port ${String(port)}`)
           return password
         }
       } catch { /* keep polling */ }
       await new Promise((r) => setTimeout(r, 800))
     }
-    throw new Error(`Le serveur OpenCode n'est pas devenu joignable sur le port ${port} (90 s). Logs : ${logFile}`)
+    const msg = `Le serveur OpenCode n'est pas devenu joignable sur le port ${port} (90 s). Logs : ${logFile}`
+    trail(`ÉCHEC : ${msg}`)
+    throw new Error(msg)
   }
 
-  /** Find or start a usable server (pure decision in bridge.planServer). */
+  private ensureServerPromise: Promise<{ baseUrl: string; password?: string }> | null = null
+
+  /**
+   * Find or start a usable server (pure decision in bridge.planServer).
+   * Les appels concurrents PARTAGENT une seule exécution : sans ça, deux
+   * appels rapprochés démarrent deux serveurs (course vécue le 2026-10-18 :
+   * 17456 puis 17457, le second tuant le premier).
+   */
   async ensureServer(): Promise<{ baseUrl: string; password?: string }> {
+    if (!this.ensureServerPromise) {
+      this.ensureServerPromise = this.ensureServerOnce().finally(() => { this.ensureServerPromise = null })
+    }
+    return this.ensureServerPromise
+  }
+
+  private async ensureServerOnce(): Promise<{ baseUrl: string; password?: string }> {
     const plan = await planServer(
       async (port, password) => probe(sdkFactory, baseUrlForPort(port), password ? { authorization: basicAuth(password) } : undefined),
       this.settings.port,
