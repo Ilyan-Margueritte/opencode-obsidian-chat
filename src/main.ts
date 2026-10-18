@@ -13,13 +13,20 @@ import {
   pluginFolderPath,
   serveLogCandidates,
   normalizeHeaders,
+  parseCommandInput,
+  filterCommands,
+  nextCommandSelection,
   DEFAULT_PORT,
   DEFAULT_MODEL,
   DESKTOP_CLI,
+  type CommandInfo,
   type OpenCodeClient,
 } from "./bridge"
 
 const VIEW_TYPE = "opencode-memory-chat"
+
+/** Durée de fraîcheur de la liste des commandes avant rechargement. */
+const COMMAND_TTL_MS = 60_000
 
 /* Piste de diagnostic HORS du vault (jamais de fichier chez l'utilisateur,
    jamais bloquante) : %TEMP%\opencode-memory-chat.log. Sert à vérifier de
@@ -269,6 +276,13 @@ class ChatView extends ItemView {
   private inputEl!: HTMLTextAreaElement
   private statusEl!: HTMLElement
   private busy = false
+  private menuEl!: HTMLElement
+  private commands: CommandInfo[] = []
+  private commandsFetchedAt = 0
+  private menuOpen = false
+  private filtered: CommandInfo[] = []
+  private selection = 0
+  private lastQuery = ""
 
   constructor(leaf: WorkspaceLeaf, plugin: OpenCodeMemoryChatPlugin) {
     super(leaf)
@@ -290,12 +304,21 @@ class ChatView extends ItemView {
     this.statusEl = root.createDiv({ cls: "ocmc-status", text: "Prêt." })
     this.messagesEl = root.createDiv({ cls: "ocmc-messages" })
     const composer = root.createDiv({ cls: "ocmc-composer" })
+    this.menuEl = composer.createDiv({ cls: "ocmc-cmd-menu" })
     this.inputEl = composer.createEl("textarea", { cls: "ocmc-input" }) as HTMLTextAreaElement
     this.inputEl.rows = 2
-    this.inputEl.placeholder = "Posez une question à la mémoire…"
+    this.inputEl.placeholder = "Posez une question à la mémoire… (tapez / pour les commandes)"
     const send = composer.createEl("button", { text: "Envoyer", cls: "ocmc-send" })
     send.onclick = () => this.send()
+    this.inputEl.addEventListener("input", () => { void this.refreshCommandMenu() })
     this.inputEl.addEventListener("keydown", (e) => {
+      if (this.menuOpen) {
+        if (e.key === "ArrowDown") { e.preventDefault(); this.moveSelection(1); return }
+        if (e.key === "ArrowUp") { e.preventDefault(); this.moveSelection(-1); return }
+        if (e.key === "Escape") { e.preventDefault(); this.closeMenu(); return }
+        if (e.key === "Tab") { e.preventDefault(); this.completeSelected(); return }
+        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void this.executeSelected(); return }
+      }
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); this.send() }
     })
 
@@ -319,6 +342,9 @@ class ChatView extends ItemView {
         this.setStatus(String(e))
       }
     }
+
+    // Liste dynamique des commandes (best-effort : le panneau s'ouvre sans).
+    void this.loadCommands()
   }
 
   private setStatus(t: string) { this.statusEl.setText(t) }
@@ -349,8 +375,16 @@ class ChatView extends ItemView {
     if (this.busy) return
     const text = this.inputEl.value.trim()
     if (!text) return
+    // Commande connue du serveur → exécution réelle ; sinon message normal
+    // (compatibilité : « /quelque chose » inconnu part comme avant).
+    const command = parseCommandInput(text)
+    if (command && this.commands.some((c) => c.name === command.name)) {
+      await this.runCommand(command.name, command.args, text)
+      return
+    }
     this.busy = true
     this.inputEl.value = ""
+    this.closeMenu()
     this.renderMessage("user", text)
     this.setStatus("Réflexion…")
     try {
@@ -359,6 +393,115 @@ class ChatView extends ItemView {
       const lastAssistant = [...msgs].reverse().find((m) => m.role === "assistant")
       if (lastAssistant) this.renderMessage("assistant", lastAssistant.text)
       else this.renderMessage("system", "(réponse vide — voir les réglages de modèle)")
+      if (c.sessionID) {
+        this.plugin.settings.lastSessionID = c.sessionID
+        await this.plugin.saveSettings()
+      }
+      this.setStatus("Prêt.")
+    } catch (e) {
+      this.setStatus(`Erreur : ${String(e)}`)
+    } finally {
+      this.busy = false
+    }
+  }
+
+  /* --- Palette de commandes « / » (liste dynamique du serveur) ----------- */
+
+  private async loadCommands(): Promise<void> {
+    if (this.busy) return
+    try {
+      const c = await this.plugin.getController()
+      this.commands = await c.listCommands()
+    } catch {
+      // Serveur pas encore joignable : la palette reste indisponible,
+      // l'envoi normal fonctionne toujours. Nouvel essai après le TTL.
+      this.commands = []
+    }
+    this.commandsFetchedAt = Date.now()
+  }
+
+  private closeMenu() {
+    if (!this.menuOpen && this.filtered.length === 0) return
+    this.menuOpen = false
+    this.filtered = []
+    this.lastQuery = ""
+    this.menuEl.empty()
+    this.menuEl.removeClass("is-open")
+  }
+
+  private async refreshCommandMenu(): Promise<void> {
+    if (this.busy) { this.closeMenu(); return }
+    const value = this.inputEl.value
+    // Palette ouverte seulement pendant la frappe du NOM (« /mem ») ;
+    // dès qu'un espace apparaît (arguments), elle se ferme.
+    if (!value.startsWith("/") || /\s/.test(value)) { this.closeMenu(); return }
+    if (this.commands.length === 0 || Date.now() - this.commandsFetchedAt > COMMAND_TTL_MS) {
+      await this.loadCommands()
+      if (this.inputEl.value !== value) { void this.refreshCommandMenu(); return }
+    }
+    const query = value.slice(1)
+    const filtered = filterCommands(this.commands, query)
+    if (filtered.length === 0) { this.closeMenu(); return }
+    if (query !== this.lastQuery) { this.selection = 0; this.lastQuery = query }
+    this.filtered = filtered
+    this.menuOpen = true
+    this.renderMenu()
+  }
+
+  private renderMenu() {
+    this.menuEl.empty()
+    this.filtered.forEach((cmd, index) => {
+      const item = this.menuEl.createDiv({ cls: "ocmc-cmd-item" })
+      item.toggleClass("is-selected", index === this.selection)
+      item.createDiv({ cls: "ocmc-cmd-name", text: `/${cmd.name}` })
+      if (cmd.description) item.createDiv({ cls: "ocmc-cmd-desc", text: cmd.description })
+      item.addEventListener("mousedown", (e) => {
+        e.preventDefault() // garder le focus dans la zone de saisie
+        this.selection = index
+        void this.executeSelected()
+      })
+    })
+    this.menuEl.addClass("is-open")
+  }
+
+  private moveSelection(delta: number) {
+    if (this.filtered.length === 0) return
+    this.selection = nextCommandSelection(this.selection, delta, this.filtered.length)
+    this.renderMenu()
+  }
+
+  /** Tab : complète le nom sélectionné (« /dream ») sans exécuter. */
+  private completeSelected() {
+    const cmd = this.filtered[this.selection]
+    if (!cmd) return
+    this.inputEl.value = `/${cmd.name} `
+    this.inputEl.focus()
+    this.closeMenu()
+  }
+
+  /** Entrée (palette ouverte) ou clic : exécute la commande sélectionnée. */
+  private async executeSelected() {
+    const cmd = this.filtered[this.selection]
+    if (!cmd) return
+    this.closeMenu()
+    await this.runCommand(cmd.name, "")
+  }
+
+  private async runCommand(name: string, args: string, display?: string) {
+    if (this.busy) return
+    this.busy = true
+    this.inputEl.value = ""
+    this.closeMenu()
+    this.renderMessage("user", display ?? (args ? `/${name} ${args}` : `/${name}`))
+    this.setStatus(`Commande /${name} en cours… (peut prendre plusieurs minutes)`)
+    try {
+      const c = await this.plugin.getController()
+      const msgs = await c.sendCommand(name, args)
+      // La sortie d'une commande peut être une réponse d'agent (memory) OU un
+      // bilan système (/dream, entrée synthétique).
+      const last = [...msgs].reverse().find((m) => m.role !== "user")
+      if (last) this.renderMessage(last.role, last.text)
+      else this.renderMessage("system", "(commande exécutée)")
       if (c.sessionID) {
         this.plugin.settings.lastSessionID = c.sessionID
         await this.plugin.saveSettings()

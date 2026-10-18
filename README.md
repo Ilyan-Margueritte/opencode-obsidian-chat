@@ -30,6 +30,21 @@ directement depuis votre vault.
 - **Complétion** : le panneau attend l'entrée `idle` de la session (le message
   assistant apparaît dès le premier token streamé).
 
+## Commandes « / »
+
+Tapez `/` dans la zone de saisie : la liste des commandes du serveur apparaît
+au-dessus (chargée dynamiquement, rafraîchie chaque minute). Filtrez en tapant,
+naviguez avec `↑`/`↓`, complétez avec `Tab`, exécutez avec `Entrée` (ou au
+clic). `Échap` ferme la liste.
+
+- Le nom seul (`/dream`) s'exécute directement. Pour passer des arguments
+  (`/memory conflicts`), tapez l'espace après le nom — la liste se ferme et
+  `Entrée` envoie la commande complète.
+- Commande inconnue → le texte part comme message normal (rien ne casse).
+- `/dream` (fourni par le plugin mémoire) : lance immédiatement un dream —
+  consolidation de la conversation + organisation de la mémoire — et affiche
+  le bilan dans le chat. Selon la taille de la mémoire, comptez 1 à 3 minutes.
+
 ## Développement
 
 ```bash
@@ -39,4 +54,4 @@ bun run scripts/install.ts "C:/path/du/vault"   # installe + active dans le vaul
 bun run scripts/e2e-chat.ts <serve-stdout-log>  # chat réel bout-en-bout
 ```
 
-Tests : 17 (logique pure du pont — aucun mock Obsidian).
+Tests : 46 (logique pure du pont — aucun mock Obsidian).

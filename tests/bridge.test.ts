@@ -16,6 +16,10 @@ import {
   serveLogPath,
   serveLogCandidates,
   normalizeHeaders,
+  parseCommandInput,
+  filterCommands,
+  nextCommandSelection,
+  commandInfoFromList,
 } from "../src/bridge"
 import { isAbsolute, join } from "node:path"
 
@@ -370,5 +374,122 @@ describe("ChatController", () => {
     expect(c.sessionID).toBeNull()
     await c.ensureSession()
     expect(c.sessionID).toBe("sid-5")
+  })
+})
+
+describe("commandes du panneau (palette « / » dynamique)", () => {
+  test("parseCommandInput découpe /nom et arguments (commande imbriquée incluse)", () => {
+    expect(parseCommandInput("/dream")).toEqual({ name: "dream", args: "" })
+    expect(parseCommandInput("  /memory conflicts  ")).toEqual({ name: "memory", args: "conflicts" })
+    expect(parseCommandInput("/team/review src/a.ts --fix")).toEqual({ name: "team/review", args: "src/a.ts --fix" })
+  })
+
+  test("parseCommandInput refuse ce qui n'est pas une commande (repli en message normal)", () => {
+    expect(parseCommandInput("bonjour")).toBeNull()
+    expect(parseCommandInput("/")).toBeNull()
+    expect(parseCommandInput("/ spaced")).toBeNull()
+    expect(parseCommandInput("/dream!")).toBeNull()
+    expect(parseCommandInput("/espace final ")).toEqual({ name: "espace", args: "final" })
+  })
+
+  test("filterCommands : préfixe insensible à la casse, requête vide → tout", () => {
+    const list = commandInfoFromList({ data: [{ name: "memory" }, { name: "dream" }, { name: "create-agent" }] })
+    expect(filterCommands(list, "").map((c) => c.name)).toEqual(["create-agent", "dream", "memory"])
+    expect(filterCommands(list, "dr").map((c) => c.name)).toEqual(["dream"])
+    expect(filterCommands(list, "DR").map((c) => c.name)).toEqual(["dream"])
+    expect(filterCommands(list, "zzz")).toEqual([])
+  })
+
+  test("nextCommandSelection boucle dans les deux sens", () => {
+    expect(nextCommandSelection(0, 1, 3)).toBe(1)
+    expect(nextCommandSelection(0, -1, 3)).toBe(2)
+    expect(nextCommandSelection(2, 1, 3)).toBe(0)
+    expect(nextCommandSelection(0, 1, 0)).toBe(-1)
+  })
+
+  test("commandInfoFromList tolère les entrées invalides, déduplique et trie", () => {
+    const list = commandInfoFromList({
+      data: [{ name: "memory", description: "M" }, null, {}, { name: "" }, { name: "dream" }, { name: "memory", description: "doublon" }],
+    })
+    expect(list).toEqual([{ name: "dream" }, { name: "memory", description: "M" }])
+    expect(commandInfoFromList(undefined)).toEqual([])
+    expect(commandInfoFromList({ data: "nope" })).toEqual([])
+  })
+
+  test("listCommands lit la liste dynamique du serveur", async () => {
+    const factory = () => ({
+      server: { info: async () => ({}) },
+      command: { list: async () => ({ data: [{ name: "dream", description: "D" }, { name: "memory" }] }) },
+      session: { create: async () => ({ sessionID: "sid" }), prompt: async () => ({}), context: async () => [] },
+    })
+    const c = new ChatController(factory as any, { baseUrl: "http://x", agent: "memory", model: DEFAULT_MODEL })
+    expect((await c.listCommands()).map((info) => info.name)).toEqual(["dream", "memory"])
+  })
+
+  test("sendCommand exécute la commande et attend le NOUVEAU tour (jamais une réponse d'un tour sans idle)", async () => {
+    const calls: any[] = []
+    let ctxCalls = 0
+    const factory = () => ({
+      server: { info: async () => ({}) },
+      session: {
+        create: async () => ({ sessionID: "sid-cmd" }),
+        prompt: async () => ({}),
+        command: async (input: any) => { calls.push(input); return {} },
+        context: async () => {
+          ctxCalls++
+          if (ctxCalls === 1) return [{ type: "user", text: "ancien" }] // capture de « before »
+          if (ctxCalls <= 3) return [{ type: "user", text: "ancien" }, { type: "user", text: "prompt développé" }] // tour en cours, slice STABLE
+          return [
+            { type: "user", text: "ancien" },
+            { type: "user", text: "prompt développé" },
+            { type: "assistant", content: [{ type: "reasoning", text: "…" }, { type: "text", text: "réponse" }] },
+            { type: "idle" },
+          ]
+        },
+      },
+    })
+    const c = new ChatController(factory as any, { baseUrl: "http://x", agent: "memory", model: DEFAULT_MODEL })
+    await c.resumeSession("ses-1")
+    const msgs = await c.sendCommand("memory", "stats")
+    expect(calls).toEqual([{ sessionID: "ses-1", name: "memory", text: "stats" }])
+    expect(msgs.map((m) => [m.role, m.text])).toEqual([
+      ["user", "ancien"],
+      ["user", "prompt développé"],
+      ["assistant", "réponse"],
+    ])
+  })
+
+  test("sendCommand revient dès qu'une entrée synthétique est stable (commande sans tour de modèle, ex. /dream)", async () => {
+    let ctxCalls = 0
+    const factory = () => ({
+      server: { info: async () => ({}) },
+      session: {
+        create: async () => ({ sessionID: "sid-dream" }),
+        prompt: async () => ({}),
+        command: async () => ({}),
+        context: async () => {
+          ctxCalls++
+          if (ctxCalls === 1) return []
+          return [{ type: "synthetic", text: "🌙 Dream terminé" }]
+        },
+      },
+    })
+    const c = new ChatController(factory as any, { baseUrl: "http://x", agent: "memory", model: DEFAULT_MODEL })
+    const msgs = await c.sendCommand("dream", "")
+    expect(msgs).toEqual([{ role: "system", text: "🌙 Dream terminé" }])
+  })
+
+  test("sendCommand propage l'erreur du serveur (commande inconnue)", async () => {
+    const factory = () => ({
+      server: { info: async () => ({}) },
+      session: {
+        create: async () => ({ sessionID: "sid-err" }),
+        prompt: async () => ({}),
+        command: async () => { throw new Error("CommandNotFoundError") },
+        context: async () => [],
+      },
+    })
+    const c = new ChatController(factory as any, { baseUrl: "http://x", agent: "memory", model: DEFAULT_MODEL })
+    await expect(c.sendCommand("nope", "")).rejects.toThrow("CommandNotFoundError")
   })
 })

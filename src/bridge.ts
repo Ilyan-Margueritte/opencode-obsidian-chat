@@ -14,6 +14,9 @@ export type ChatMessage = {
   id?: string
 }
 
+/** Une commande serveur affichée dans la palette « / » (liste dynamique). */
+export type CommandInfo = { name: string; description?: string }
+
 export type BridgeOptions = {
   baseUrl: string
   agent: string
@@ -35,10 +38,12 @@ export const DESKTOP_CLI = "C:/Users/ordi2525778/AppData/Local/Programs/@opencod
 
 export type OpenCodeClient = {
   server: { info: (ro?: any) => Promise<ServerInfo> }
+  command: { list: () => Promise<unknown> }
   session: {
     create: (input: { id?: { title?: string; agent?: string; model?: ChatModel } }) => Promise<{ sessionID?: string; id?: string }>
     prompt: (input: { sessionID: string; text: string }) => Promise<unknown>
     context: (input: { sessionID: string }) => Promise<Array<{ id?: string; type?: string; text?: string; role?: string; content?: unknown }>>
+    command: (input: { sessionID: string; name: string; text: string }) => Promise<unknown>
   }
 }
 
@@ -231,6 +236,56 @@ export function contextToMessages(ctx: Array<{ id?: string; type?: string; text?
   return out
 }
 
+/* --- Palette de commandes « / » : logique pure, testable sans Obsidian ---- */
+
+/** Nom de commande accepté : jeton sans espace, commençant par alphanumérique. */
+const COMMAND_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9/_-]*$/
+
+/**
+ * Analyse « /nom args… ». Renvoie null quand le texte n'est pas une commande
+ * (il part alors comme message normal, comme avant) : le premier jeton doit
+ * être un nom valide.
+ */
+export function parseCommandInput(text: string): { name: string; args: string } | null {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith("/")) return null
+  const rest = trimmed.slice(1)
+  const space = rest.search(/\s/)
+  const name = space === -1 ? rest : rest.slice(0, space)
+  const args = space === -1 ? "" : rest.slice(space + 1).trim()
+  if (!COMMAND_NAME_RE.test(name)) return null
+  return { name, args }
+}
+
+/** Filtre la palette : préfixe insensible à la casse ; requête vide → tout. */
+export function filterCommands(commands: CommandInfo[], query: string): CommandInfo[] {
+  const q = query.trim().toLowerCase()
+  if (!q) return commands
+  return commands.filter((command) => command.name.toLowerCase().startsWith(q))
+}
+
+/** Sélection suivante/précédente avec bouclage ; -1 quand la liste est vide. */
+export function nextCommandSelection(current: number, delta: number, count: number): number {
+  if (count <= 0) return -1
+  return (((current + delta) % count) + count) % count
+}
+
+/** Normalise la réponse de `command.list()` : entrées valides, dédupliquées, triées. */
+export function commandInfoFromList(response: unknown): CommandInfo[] {
+  const data = (response as { data?: unknown } | undefined)?.data
+  if (!Array.isArray(data)) return []
+  const seen = new Set<string>()
+  const out: CommandInfo[] = []
+  for (const item of data) {
+    const raw = item as { name?: unknown; description?: unknown } | null
+    const name = typeof raw?.name === "string" ? raw.name.trim() : ""
+    if (!name || seen.has(name)) continue
+    seen.add(name)
+    out.push(typeof raw?.description === "string" ? { name, description: raw.description } : { name })
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name))
+}
+
 /** A chat controller: owns a client + a session. */
 export class ChatController {
   private client: OpenCodeClient
@@ -297,6 +352,41 @@ export class ChatController {
       await new Promise((r) => setTimeout(r, 600))
     }
     // timeout: return whatever we have
+    const ctx = await this.client.session.context({ sessionID: sid })
+    return contextToMessages(ctx)
+  }
+
+  /** Liste dynamique des commandes du serveur (palette « / »). */
+  async listCommands(): Promise<CommandInfo[]> {
+    return commandInfoFromList(await this.client.command.list())
+  }
+
+  /**
+   * Exécute une commande « /nom » et attend son issue. Deux cas :
+   * - la commande soumet un prompt (fichier `commands/*.md`) → un tour
+   *   démarre : on attend le NOUVEAU idle, exactement comme send() ;
+   * - la commande n'injecte que des entrées synthétiques (/dream) → aucun
+   *   tour de modèle : on revient dès que la tranche fraîche est non vide et
+   *   stable d'un sondage à l'autre.
+   * On ne revient JAMAIS tant que la tranche fraîche contient une entrée
+   * utilisateur sans idle : le tour est encore en cours.
+   */
+  async sendCommand(name: string, args: string, timeoutMs = 300000): Promise<ChatMessage[]> {
+    const sid = await this.ensureSession()
+    const before = (await this.client.session.context({ sessionID: sid })).length
+    await this.client.session.command({ sessionID: sid, name, text: args })
+    const deadline = Date.now() + timeoutMs
+    let lastFreshLength = -1
+    while (Date.now() < deadline) {
+      const ctx = await this.client.session.context({ sessionID: sid })
+      const fresh = ctx.slice(before)
+      if (fresh.some((e) => String(e.type ?? "") === "idle")) return contextToMessages(ctx)
+      const turnPending = fresh.some((e) => entryRole(e) === "user")
+      if (!turnPending && fresh.length > 0 && fresh.length === lastFreshLength) return contextToMessages(ctx)
+      lastFreshLength = fresh.length
+      await new Promise((r) => setTimeout(r, 600))
+    }
+    // timeout : on rend ce qu'on a, comme send()
     const ctx = await this.client.session.context({ sessionID: sid })
     return contextToMessages(ctx)
   }

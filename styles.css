@@ -71,6 +71,7 @@
   padding: 8px 10px;
   border-top: 1px solid var(--background-modifier-border);
   align-items: flex-end;
+  position: relative;
 }
 
 .ocmc-input {
@@ -80,4 +81,57 @@
 
 .ocmc-send {
   flex-shrink: 0;
+}
+
+/* Palette de commandes « / » — liste dynamique au-dessus de la saisie */
+
+.ocmc-cmd-menu {
+  display: none;
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 100%;
+  flex-direction: column;
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-s);
+  z-index: 20;
+}
+
+.ocmc-cmd-menu.is-open {
+  display: flex;
+}
+
+.ocmc-cmd-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 9px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.ocmc-cmd-item:last-child {
+  border-bottom: none;
+}
+
+.ocmc-cmd-item.is-selected {
+  background: var(--background-modifier-hover);
+}
+
+.ocmc-cmd-name {
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+}
+
+.ocmc-cmd-desc {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
