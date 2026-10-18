@@ -13,6 +13,7 @@ import {
   pluginFolderPath,
   serveLogCandidates,
   normalizeHeaders,
+  fetchResponse,
   parseCommandInput,
   filterCommands,
   nextCommandSelection,
@@ -50,7 +51,9 @@ function obsidianFetch(): typeof fetch {
     const headers = normalizeHeaders(init?.headers)
     const body = typeof init?.body === "string" ? init.body : undefined
     const r = await requestUrl({ url, method, headers, body, throw: false })
-    return new Response(r.text, { status: r.status, headers: r.headers })
+    // Statut 204 possible (POST /command) : fetchResponse gère les corps
+    // interdits — new Response("", {status:204}) levait en plein vol.
+    return fetchResponse(r.status, r.text, r.headers)
   }) as typeof fetch
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "opencode-memory-chat",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Small Obsidian plugin: chat with the OpenCode memory agent (@memory) from a side panel. Auto-starts the OpenCode server if needed.",
   "type": "module",
   "scripts": {

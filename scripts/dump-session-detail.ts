@@ -4,7 +4,7 @@
 import { readFileSync } from "node:fs"
 import { request as httpRequest } from "node:http"
 import { OpenCode } from "@opencode/client/promise"
-import { basicAuthHeader, contextToMessages, normalizeHeaders } from "../src/bridge"
+import { basicAuthHeader, contextToMessages, fetchResponse, normalizeHeaders } from "../src/bridge"
 
 const V = "C:/Users/ordi2525778/Documents/obsidian/opencode-memory/.obsidian/plugins/opencode-memory-chat/"
 const data = JSON.parse(readFileSync(V + "data.json", "utf8"))
@@ -42,7 +42,7 @@ const shim = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const headers = normalizeHeaders(init?.headers)
   const body = typeof init?.body === "string" ? init.body : undefined
   const r = await requestUrlLike({ url, method: init?.method ?? "GET", headers, body })
-  return new Response(r.text, { status: r.status, headers: r.headers })
+  return fetchResponse(r.status, r.text, r.headers)
 }) as typeof fetch
 
 async function tryPort(port: string) {

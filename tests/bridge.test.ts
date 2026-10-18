@@ -20,6 +20,7 @@ import {
   filterCommands,
   nextCommandSelection,
   commandInfoFromList,
+  fetchResponse,
 } from "../src/bridge"
 import { isAbsolute, join } from "node:path"
 
@@ -491,5 +492,30 @@ describe("commandes du panneau (palette « / » dynamique)", () => {
     })
     const c = new ChatController(factory as any, { baseUrl: "http://x", agent: "memory", model: DEFAULT_MODEL })
     await expect(c.sendCommand("nope", "")).rejects.toThrow("CommandNotFoundError")
+  })
+})
+
+describe("fetchResponse (statuts à corps interdit)", () => {
+  test("204 construit une Response SANS corps (le shim levait avant)", () => {
+    // VÉCU : POST /api/session/:id/command → 204 ; new Response("", {status:204})
+    // lève « Response with null body status cannot have body » → erreur de
+    // transport SDK alors que la commande a tourné côté serveur.
+    const r = fetchResponse(204, "", {})
+    expect(r.status).toBe(204)
+    expect(r.body).toBeNull()
+  })
+  test("304 et 205 aussi (tous les statuts à corps interdit)", () => {
+    expect(fetchResponse(304, "", {}).body).toBeNull()
+    expect(fetchResponse(205, "", {}).body).toBeNull()
+  })
+  test("200 conserve le corps et les en-têtes", async () => {
+    const r = fetchResponse(200, '{"ok":true}', { "content-type": "application/json" })
+    expect(r.status).toBe(200)
+    expect(await r.text()).toBe('{"ok":true}')
+    expect(r.headers.get("content-type")).toBe("application/json")
+  })
+  test("une erreur de corps vide sur 200 reste un corps vide valide", async () => {
+    const r = fetchResponse(200, "", {})
+    expect(await r.text()).toBe("")
   })
 })

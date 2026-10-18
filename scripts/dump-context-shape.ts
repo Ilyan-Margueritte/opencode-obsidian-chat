@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs"
 import { request as httpRequest } from "node:http"
 import { OpenCode } from "@opencode/client/promise"
-import { basicAuthHeader, normalizeHeaders } from "../src/bridge"
+import { basicAuthHeader, fetchResponse, normalizeHeaders } from "../src/bridge"
 
 const V = "C:/Users/ordi2525778/Documents/obsidian/opencode-memory/.obsidian/plugins/opencode-memory-chat/"
 const pw = JSON.parse(readFileSync(V + "data.json", "utf8")).passwords["17456"]
@@ -39,7 +39,7 @@ const shim = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const headers = normalizeHeaders(init?.headers)
   const body = typeof init?.body === "string" ? init.body : undefined
   const r = await requestUrlLike({ url, method: init?.method ?? "GET", headers, body })
-  return new Response(r.text, { status: r.status, headers: r.headers })
+  return fetchResponse(r.status, r.text, r.headers)
 }) as typeof fetch
 
 const client = OpenCode.make({ baseUrl: "http://127.0.0.1:17456", headers: { authorization: auth }, fetch: shim }) as any

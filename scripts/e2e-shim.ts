@@ -13,6 +13,7 @@ import {
   basicAuthHeader,
   contextToMessages,
   normalizeHeaders,
+  fetchResponse,
   parseServePassword,
   planServer,
   pluginFolderPath,
@@ -58,7 +59,7 @@ function obsidianFetchLike(): typeof fetch {
     const headers = normalizeHeaders(init?.headers)
     const body = typeof init?.body === "string" ? init.body : undefined
     const r = await requestUrlLike({ url, method, headers, body })
-    return new Response(r.text, { status: r.status, headers: r.headers })
+    return fetchResponse(r.status, r.text, r.headers)
   }) as typeof fetch
 }
 

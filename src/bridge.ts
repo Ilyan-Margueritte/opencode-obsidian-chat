@@ -161,6 +161,23 @@ export function normalizeHeaders(headers: HeadersInit | undefined): Record<strin
   return out
 }
 
+/** Statuts HTTP à corps interdit : Response lève si on leur donne un corps. */
+const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304])
+
+/**
+ * Construit la Response rendue au SDK depuis les morceaux bruts du shim
+ * (requestUrl d'Obsidian / httpRequest des scripts). PIÈGE VÉCU (2026-10-18) :
+ * le POST /api/session/:id/command peut répondre 204 No Content ;
+ * `new Response("", { status: 204 })` lève « Response with null body status
+ * cannot have body » → le SDK la remonte en erreur de transport et le panneau
+ * affiche « Erreur : ClientError: Transport… » ALORS QUE la commande a bien
+ * tourné côté serveur (le bilan /dream était dans la session). Pour ces
+ * statuts, le corps doit être null.
+ */
+export function fetchResponse(status: number, text: string, headers: Record<string, string> = {}): Response {
+  return new Response(NULL_BODY_STATUSES.has(status) ? null : text, { status, headers })
+}
+
 /**
  * Candidate log paths, best first: inside the plugin folder, then the OS temp
  * directory. The caller tries each in order — the log MUST be openable, or we
