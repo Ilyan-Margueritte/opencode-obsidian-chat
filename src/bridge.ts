@@ -136,6 +136,19 @@ export function serveLogPath(pluginFolder: string, port: number): string {
   return join(pluginFolder, `serve-${port}.log`)
 }
 
+/**
+ * Candidate log paths, best first: inside the plugin folder, then the OS temp
+ * directory. The caller tries each in order — the log MUST be openable, or we
+ * cannot capture the server password.
+ */
+export function serveLogCandidates(pluginFolder: string | undefined, tmp: string, port: number): string[] {
+  const list: string[] = []
+  if (pluginFolder) list.push(serveLogPath(pluginFolder, port))
+  const fallback = serveLogPath(tmp, port)
+  if (!list.includes(fallback)) list.push(fallback)
+  return list
+}
+
 /** Pick the session id from a create() response (field name varies). */
 export function extractSessionId(resp: { sessionID?: string; id?: string }): string | undefined {
   return resp?.sessionID ?? resp?.id

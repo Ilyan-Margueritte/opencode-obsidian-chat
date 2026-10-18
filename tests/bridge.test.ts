@@ -14,6 +14,7 @@ import {
   planServer,
   pluginFolderPath,
   serveLogPath,
+  serveLogCandidates,
 } from "../src/bridge"
 import { isAbsolute, join } from "node:path"
 
@@ -102,6 +103,26 @@ describe("chemins de fichiers (manifest.dir est RELATIF : bug ENOENT du 2026-10-
     const log = serveLogPath(dir, 17456)
     expect(isAbsolute(log)).toBe(true)
     expect(log).toBe(join(dir, "serve-17456.log"))
+  })
+})
+
+describe("serveLogCandidates (le log doit TOUJOURS être écrivable : dossier plugin, sinon tmpdir)", () => {
+  test("préfère le dossier du plugin, tmpdir en secours", () => {
+    const plugin = join("C:\\vault", ".obsidian", "plugins", "opencode-memory-chat")
+    const list = serveLogCandidates(plugin, "C:\\Temp", 17456)
+    expect(list).toHaveLength(2)
+    expect(list[0]).toBe(join(plugin, "serve-17456.log"))
+    expect(list[1]).toBe(join("C:\\Temp", "serve-17456.log"))
+  })
+
+  test("dossier plugin indisponible (basePath inconnu) → tmpdir seul", () => {
+    const list = serveLogCandidates(undefined, "C:\\Temp", 17456)
+    expect(list).toEqual([join("C:\\Temp", "serve-17456.log")])
+  })
+
+  test("dossier plugin identique à tmpdir → aucun doublon", () => {
+    const list = serveLogCandidates("C:\\Temp", "C:\\Temp", 17456)
+    expect(list).toEqual([join("C:\\Temp", "serve-17456.log")])
   })
 })
 

@@ -1,7 +1,8 @@
 import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, requestUrl } from "obsidian"
 import { spawn, type ChildProcess } from "child_process"
 import { mkdirSync } from "node:fs"
-import { open as fsOpen, readFile } from "node:fs/promises"
+import { open as fsOpen, readFile, type FileHandle } from "node:fs/promises"
+import { dirname } from "node:path"
 import { tmpdir } from "node:os"
 import { OpenCode } from "@opencode/client/promise"
 import {
@@ -10,7 +11,7 @@ import {
   planServer,
   baseUrlForPort,
   pluginFolderPath,
-  serveLogPath,
+  serveLogCandidates,
   DEFAULT_PORT,
   DEFAULT_MODEL,
   DESKTOP_CLI,
@@ -100,11 +101,31 @@ export default class OpenCodeMemoryChatPlugin extends Plugin {
    * Obsidian is VAULT-RELATIVE (e.g. ".obsidian/plugins/<id>") — used as-is
    * with fs it resolves against the Obsidian app folder and opens ENOENT
    * (bug vécu le 2026-10-18). We rebuild an absolute path from the vault's
-   * real base path; tmpdir only as a last-resort fallback.
+   * real base path; undefined (→ tmpdir) only as a last-resort fallback.
    */
-  private pluginFolder(): string {
+  private pluginFolder(): string | undefined {
     const base = this.vaultBasePath()
-    return base ? pluginFolderPath(base, this.app.vault.configDir, this.manifest.id) : tmpdir()
+    return base ? pluginFolderPath(base, this.app.vault.configDir, this.manifest.id) : undefined
+  }
+
+  /**
+   * Open the serve log in the first WRITABLE candidate location (plugin
+   * folder first, then the OS temp dir). Returns the path actually used —
+   * password capture must never depend on a single directory existing.
+   */
+  private async openServeLog(port: number): Promise<{ path: string; handle: FileHandle }> {
+    const candidates = serveLogCandidates(this.pluginFolder(), tmpdir(), port)
+    let lastError: unknown
+    for (const path of candidates) {
+      try {
+        mkdirSync(dirname(path), { recursive: true })
+        const handle = await fsOpen(path, "w")
+        return { path, handle }
+      } catch (error) {
+        lastError = error
+      }
+    }
+    throw new Error(`Impossible d'ouvrir un fichier de log pour le serveur (essayé : ${candidates.join(" ; ")}) : ${lastError instanceof Error ? lastError.message : String(lastError)}`)
   }
 
   /**
@@ -115,15 +136,7 @@ export default class OpenCodeMemoryChatPlugin extends Plugin {
    */
   private async spawnServer(port: number): Promise<string | undefined> {
     if (this.child && !this.child.killed) this.child.kill()
-    const folder = this.pluginFolder()
-    mkdirSync(folder, { recursive: true })
-    const logFile = serveLogPath(folder, port)
-    let out
-    try {
-      out = await fsOpen(logFile, "w")
-    } catch (error) {
-      throw new Error(`Impossible d'ouvrir le fichier de log « ${logFile} » : ${error instanceof Error ? error.message : String(error)}`)
-    }
+    const { path: logFile, handle: out } = await this.openServeLog(port)
     this.child = spawn(
       this.settings.cliPath,
       ["serve", "--hostname", "127.0.0.1", "--port", String(port), "--cors", "*"],
