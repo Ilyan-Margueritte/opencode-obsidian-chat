@@ -126,13 +126,15 @@ try {
   const controller = new ChatController(sdkFactory as any, { baseUrl: url(plan.port), agent: "memory", model: MODEL, password })
 
   // 3. Liste dynamique : le plugin reconstruit doit exposer /dream (+ /memory FR).
-  // PIÈGE CONNU : le HTTP répond AVANT le chargement des plugins — la
-  // première liste peut être vide. On ré-essaie jusqu'à 90 s.
+  // PIÈGE CONNU (2026-10-18) : la liste grossit PAR MORCEAUX au démarrage
+  // (0 → 2 → 4 → 5) — /dream est enregistré par le plugin AVANT la commande
+  // fichier /memory. On n'arrête donc QUE quand les DEUX sont là (délai 90 s).
   let commands: Awaited<ReturnType<typeof controller.listCommands>> = []
   const listDeadline = Date.now() + 90_000
   for (let attempt = 1; ; attempt++) {
     commands = await controller.listCommands()
-    if (commands.some((c) => c.name === "dream")) break
+    const n = commands.map((c) => c.name)
+    if (n.includes("dream") && n.includes("memory")) break
     if (Date.now() >= listDeadline) break
     console.log(`LISTE tentative ${attempt}: ${commands.length} commande(s) — nouvelle tentative dans 3 s`)
     await Bun.sleep(3000)
